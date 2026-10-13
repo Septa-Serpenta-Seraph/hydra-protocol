@@ -1,0 +1,35 @@
+# Hydra Protocol — never commit a seed, a key, or a shard.
+# The protocol's whole point is that these live ON DEVICES, not in repos.
+
+# secrets
+key.priv
+key.priv.*
+*.priv
+key.pub
+*.hydra
+shard_*.json
+
+# sealed output
+sealed/
+.hydra/
+dist/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+venv/
+.venv/
+
+# editor/OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# test artifacts
+.pytest_cache/
+awakened/
