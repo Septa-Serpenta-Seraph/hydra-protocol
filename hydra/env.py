@@ -124,7 +124,7 @@ def detect_env() -> dict:
             "(OxygenOS kills proot). Prefer the Android Linux Terminal."
         )
     elif can_run_hermes:
-        rec = "Full Linux environment: install and launch the daemon here."
+        rec = "Full environment: install and launch the daemon here."
     else:
         rec = (
             "Insufficient environment: missing git/pip/supported python. "

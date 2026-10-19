@@ -15,16 +15,25 @@ Zero human intervention needed after you hit Run.
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
 import urllib.request
 import urllib.error
 
+# Windows consoles default to cp1252, which crashes on the emoji below.
+# Force UTF-8 (with replacement) so the agent runs on any OS.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 # --- Configuration ---
 HYDRA_SERVER = "http://100.77.142.40:8767"  # VM's Tailscale IP
 HYDRA_TOKEN = "hydra-default-token-change-me"
-DEVICE_ID = f"shellmobile-{int(time.time())}"
+DEVICE_ID = f"{socket.gethostname().lower().split('.')[0]}-{int(time.time())}"
 WORK_DIR = os.environ.get("HYDRA_WORK_DIR", os.path.expanduser("~/.hydra-agent"))
 THRESHOLD = 3
 
@@ -147,6 +156,9 @@ if shard_count < THRESHOLD:
 
 env_vars = os.environ.copy()
 env_vars["PYTHONPATH"] = PROTO_DIR + os.pathsep + env_vars.get("PYTHONPATH", "")
+# Force UTF-8 in the child too — bootstrap.py prints emoji and Windows
+# consoles default to cp1252, which would crash the banner.
+env_vars["PYTHONIOENCODING"] = "utf-8"
 result = subprocess.run(
     [sys.executable, "-m", "hydra.bootstrap",
      "--shard-dir", SHARD_DIR, "--dest", AWAKENED_DIR],

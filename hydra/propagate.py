@@ -184,10 +184,9 @@ def propagate(peer: dict, user, dry_run=False) -> dict:
         subprocess.run(["scp", *keyopt, "-q", str(tarball), f"{target}:{remote_agent}/"],
                        capture_output=True, timeout=120)
         if is_windows:
-            run(f'powershell -NoProfile -Command "Set-Location \'{home}\\.hydra-agent\'; '
-                f'tar xzf hydra-protocol.tar.gz; '
-                f'if (Test-Path hydra-protocol) {{ Remove-Item -Recurse -Force hydra-protocol }}; '
-                f'Get-ChildItem -Directory hydra-protocol* | Rename-Item -NewName hydra-protocol"')
+            # Use cmd's tar directly — PowerShell quoting through ssh→cmd→powershell
+            # silently fails and leaves the tarball unextracted.
+            run(f'cd /d "{home}\\.hydra-agent" && tar xzf hydra-protocol.tar.gz')
         else:
             run("cd ~/.hydra-agent && tar xzf hydra-protocol.tar.gz "
                 "&& rm -rf hydra-protocol && mv hydra-protocol-* hydra-protocol 2>/dev/null; true")
