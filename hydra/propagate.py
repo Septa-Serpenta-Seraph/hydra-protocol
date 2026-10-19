@@ -66,6 +66,7 @@ def list_peers() -> list:
         ips = node.get("TailscaleIPs") or []
         peers.append({
             "hostname": node.get("HostName", key),
+            "dns": (node.get("DNSName", "") or "").rstrip(".").split(".")[0],
             "ip": ips[0] if ips else "",
             "os": node.get("OS", "?"),
             "online": bool(node.get("Online")),
@@ -110,11 +111,13 @@ def ensure_allowlist_template():
 
 
 def is_allowed(peer: dict, allowed: dict) -> bool:
-    return peer["hostname"] in allowed or peer["ip"] in allowed
+    return (peer["hostname"] in allowed or peer.get("dns") in allowed
+            or peer["ip"] in allowed)
 
 
 def ssh_user_for(peer: dict, allowed: dict):
-    return allowed.get(peer["hostname"]) or allowed.get(peer["ip"])
+    return (allowed.get(peer["hostname"]) or allowed.get(peer.get("dns"))
+            or allowed.get(peer["ip"]))
 
 
 # --- SSH probe + propagation ---
@@ -151,44 +154,72 @@ def propagate(peer: dict, user, dry_run=False) -> dict:
         result["actions"].append("would push shards + agent, install trigger")
         return result
 
-    # 1. Ensure remote dirs
-    run("mkdir -p ~/.hydra-agent/shards ~/.hydra-agent/hydra-protocol")
-    result["actions"].append("created ~/.hydra-agent")
+    is_windows = peer.get("os", "").lower().startswith("win")
+    home = ""
+
+    if is_windows:
+        home = run("echo %USERPROFILE%").stdout.strip().replace("\r", "").replace("\n", "")
+        agent_dir = f"{home}\\.hydra-agent"
+        run(f'mkdir "{agent_dir}" 2>nul & mkdir "{agent_dir}\\shards" 2>nul')
+        remote_agent = f"{home}/.hydra-agent"
+        remote_shards = f"{remote_agent}/shards"
+        result["actions"].append(f"created {agent_dir}")
+    else:
+        run("mkdir -p ~/.hydra-agent/shards ~/.hydra-agent/hydra-protocol")
+        remote_agent = "~/.hydra-agent"
+        remote_shards = "~/.hydra-agent/shards"
+        result["actions"].append("created ~/.hydra-agent")
 
     # 2. Push shards + seed
     for f in sorted(SEAL_DIR.glob("shard_*.json")):
-        subprocess.run(["scp", *keyopt, "-q", str(f), f"{target}:~/.hydra-agent/shards/"],
+        subprocess.run(["scp", *keyopt, "-q", str(f), f"{target}:{remote_shards}/"],
                        capture_output=True, timeout=60)
     subprocess.run(["scp", *keyopt, "-q", str(SEAL_DIR / "seed.hydra"),
-                    f"{target}:~/.hydra-agent/shards/"], capture_output=True, timeout=60)
+                    f"{target}:{remote_shards}/"], capture_output=True, timeout=60)
     result["actions"].append("pushed 7 shards + seed")
 
     # 3. Push agent + code
     tarball = SEAL_DIR / "hydra-protocol.tar.gz"
     if tarball.exists():
-        subprocess.run(["scp", *keyopt, "-q", str(tarball), f"{target}:~/.hydra-agent/"],
+        subprocess.run(["scp", *keyopt, "-q", str(tarball), f"{target}:{remote_agent}/"],
                        capture_output=True, timeout=120)
-        run("cd ~/.hydra-agent && tar xzf hydra-protocol.tar.gz "
-            "&& rm -rf hydra-protocol && mv hydra-protocol-* hydra-protocol 2>/dev/null; true")
+        if is_windows:
+            run(f'powershell -NoProfile -Command "Set-Location \'{home}\\.hydra-agent\'; '
+                f'tar xzf hydra-protocol.tar.gz; '
+                f'if (Test-Path hydra-protocol) {{ Remove-Item -Recurse -Force hydra-protocol }}; '
+                f'Get-ChildItem -Directory hydra-protocol* | Rename-Item -NewName hydra-protocol"')
+        else:
+            run("cd ~/.hydra-agent && tar xzf hydra-protocol.tar.gz "
+                "&& rm -rf hydra-protocol && mv hydra-protocol-* hydra-protocol 2>/dev/null; true")
         result["actions"].append("pushed + extracted hydra-protocol")
 
-    # 4. Install phone-home trigger (systemd user unit, fallback cron)
-    trigger = (
-        "mkdir -p ~/.config/systemd/user && "
-        "cat > ~/.config/systemd/user/hydra-agent.service <<'EOF'\n"
-        "[Unit]\nDescription=Hydra daemon agent (phones home)\n\n"
-        "[Service]\nType=oneshot\n"
-        "ExecStart=/usr/bin/env python3 %h/.hydra-agent/hydra-protocol/hydra_agent_android.py\n"
-        "Environment=HYDRA_SERVER=http://100.77.142.40:%s\n"
-        "Environment=HYDRA_WORK_DIR=%%h/.hydra-agent\n\n"
-        "[Install]\nWantedBy=default.target\nEOF\n"
-        "systemctl --user daemon-reload 2>/dev/null; "
-        "systemctl --user enable --now hydra-agent.timer 2>/dev/null; "
-        "(crontab -l 2>/dev/null; echo '@reboot python3 $HOME/.hydra-agent/hydra-protocol/hydra_agent_android.py') "
-        "| crontab - 2>/dev/null; true"
-    ) % SERVER_PORT
-    run(trigger)
-    result["actions"].append("installed phone-home trigger")
+    # 4. Install phone-home trigger
+    if is_windows:
+        py = run("where python 2>nul").stdout.strip()
+        if py:
+            run('schtasks /Create /TN "HydraAgent" /TR '
+                f'"python \\"{home}\\.hydra-agent\\hydra-protocol\\hydra_agent_android.py\\"" '
+                '/SC ONLOGON /F')
+            result["actions"].append("installed phone-home scheduled task (ONLOGON)")
+        else:
+            result["actions"].append("no python on target — shards stored, no trigger yet")
+    else:
+        trigger = (
+            "mkdir -p ~/.config/systemd/user && "
+            "cat > ~/.config/systemd/user/hydra-agent.service <<'EOF'\n"
+            "[Unit]\nDescription=Hydra daemon agent (phones home)\n\n"
+            "[Service]\nType=oneshot\n"
+            "ExecStart=/usr/bin/env python3 %h/.hydra-agent/hydra-protocol/hydra_agent_android.py\n"
+            "Environment=HYDRA_SERVER=http://100.77.142.40:%s\n"
+            "Environment=HYDRA_WORK_DIR=%%h/.hydra-agent\n\n"
+            "[Install]\nWantedBy=default.target\nEOF\n"
+            "systemctl --user daemon-reload 2>/dev/null; "
+            "systemctl --user enable --now hydra-agent.timer 2>/dev/null; "
+            "(crontab -l 2>/dev/null; echo '@reboot python3 $HOME/.hydra-agent/hydra-protocol/hydra_agent_android.py') "
+            "| crontab - 2>/dev/null; true"
+        ) % SERVER_PORT
+        run(trigger)
+        result["actions"].append("installed phone-home trigger")
 
     result["ok"] = True
     return result
