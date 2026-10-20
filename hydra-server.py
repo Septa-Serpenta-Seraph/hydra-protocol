@@ -117,13 +117,92 @@ class HydraHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
 
+        elif path == "/sync/manifest":
+            # Per-collection {points, ids_hash} so a node can see what it lacks.
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from hydra import qsync
+                self._send_json(200, qsync.manifest())
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+
+        elif path == "/sync/ids":
+            # Sorted point IDs for one collection (used to diff against a node).
+            name = params.get("collection", [None])[0]
+            if not name:
+                self._send_json(400, {"error": "collection required"})
+                return
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from hydra import qsync
+                ids = qsync.point_ids(qsync.DEFAULT_URL, name)
+                self._send_json(200, {"collection": name, "count": len(ids),
+                                      "ids_hash": qsync.ids_hash(ids), "ids": ids})
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+
         else:
             self._send_json(404, {"error": "not found"})
 
+    def _read_json_body(self):
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError:
+            return {}
+
     def do_POST(self):
-        from urllib.parse import urlparse, parse_qs
+        from urllib.parse import urlparse
         parsed = urlparse(self.path)
         path = parsed.path
+
+        if path == "/sync/fetch":
+            data = self._read_json_body()
+            if data.get("token") != TOKEN:
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            name = data.get("collection")
+            ids = data.get("ids") or []
+            if not name:
+                self._send_json(400, {"error": "collection required"})
+                return
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from hydra import qsync
+                pts = qsync.fetch_points(qsync.DEFAULT_URL, name, ids,
+                                         with_vectors=bool(data.get("vectors", True)))
+                self._send_json(200, {"collection": name, "points": pts})
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+            return
+
+        if path == "/sync/push":
+            data = self._read_json_body()
+            if data.get("token") != TOKEN:
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            name = data.get("collection")
+            pts = data.get("points") or []
+            if not name or not pts:
+                self._send_json(400, {"error": "collection and points required"})
+                return
+            try:
+                sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from hydra import qsync
+                # Auto-create the collection if the hub has never seen it.
+                # The node is the authority on a collection it just invented.
+                if qsync.vector_size(qsync.DEFAULT_URL, name) is None:
+                    size = next((len(p["vector"]) for p in pts
+                                 if isinstance(p.get("vector"), list)), None)
+                    if size:
+                        qsync.ensure_collection(qsync.DEFAULT_URL, name, size)
+                res = qsync.upsert_points(qsync.DEFAULT_URL, name, pts)
+                self._send_json(200, {"collection": name, "upserted": len(pts),
+                                      "result": res})
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+            return
 
         if path != "/heartbeat":
             self._send_json(404, {"error": "not found"})
